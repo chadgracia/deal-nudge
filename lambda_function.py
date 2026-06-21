@@ -21,6 +21,7 @@ import urllib.request
 import urllib.error
 import logging
 from datetime import datetime, timezone
+from html import escape
 
 import boto3
 
@@ -62,6 +63,34 @@ def _page(status, message):
         '</body></html>'
     )
     return {"statusCode": status,
+            "headers": {"Content-Type": "text/html; charset=utf-8"},
+            "body": html}
+
+
+def _confirm_page(deal_id, key, contact_name, company, test_mode, contact_email):
+    who = escape(contact_name or "the contact")
+    co = (" at " + escape(company)) if company else ""
+    note = ('<p style="background:#fffbe6;padding:8px;font-size:12px;">'
+            'Test mode: this will go to ' + escape(TEST_EMAIL_OVERRIDE) +
+            ' (real recipient would be ' + escape(contact_email) + ').</p>') if test_mode else ""
+    action = "?deal_id=" + escape(deal_id) + "&key=" + escape(key)
+    html = (
+        '<!doctype html><html><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width,initial-scale=1">'
+        '<title>Send nudge?</title></head>'
+        '<body style="font-family:Arial,sans-serif;max-width:480px;margin:80px auto;'
+        'text-align:center;color:#222;">'
+        + note +
+        '<p style="font-size:18px;">Send an update request to <b>' + who + '</b>' + co + '?</p>'
+        '<form method="POST" action="' + action + '">'
+        '<button type="submit" style="background:#1a1a1a;color:#fff;padding:12px 28px;'
+        'border:none;border-radius:6px;font-size:15px;cursor:pointer;">Send the request</button>'
+        '</form>'
+        '<p style="margin-top:24px;font-size:12px;color:#aaa;">'
+        'Nothing is sent until you press the button.</p>'
+        '</body></html>'
+    )
+    return {"statusCode": 200,
             "headers": {"Content-Type": "text/html; charset=utf-8"},
             "body": html}
 
@@ -147,6 +176,16 @@ def send_email(to_addr, subject, link, lead=""):
 # ── Handler ────────────────────────────────────────────────────────────────
 
 def lambda_handler(event, context):
+    _rc = (event.get("requestContext") or {}).get("http") or {}
+    _hdrs = event.get("headers") or {}
+    logger.info("NUDGE_CALL method=%s ip=%s ua=%s xff=%s deal_id=%s",
+                _rc.get("method"),
+                _rc.get("sourceIp"),
+                _rc.get("userAgent"),
+                _hdrs.get("x-forwarded-for") or _hdrs.get("X-Forwarded-For"),
+                (event.get("queryStringParameters") or {}).get("deal_id"))
+
+    method = (_rc.get("method") or "GET").upper()
     params = event.get("queryStringParameters") or {}
     test_mode = bool(TEST_EMAIL_OVERRIDE)
 
@@ -194,6 +233,13 @@ def lambda_handler(event, context):
 
     if not contact_email:
         return _page(200, f"No email on file for the contact on deal {deal_id}. Nothing sent.")
+
+    # Safe GET: a GET only RENDERS a confirmation page — nothing is sent. The email is
+    # sent only when the Send button POSTs back, so scanners/prefetch/unfurlers (which
+    # fetch with GET and never submit forms) can no longer trigger a send.
+    if method != "POST":
+        return _confirm_page(deal_id, params.get("key") or "", contact_name, company,
+                             test_mode, contact_email)
 
     subject = NUDGE_SUBJECT.format(company=company) if company else "Activity on your order"
     link = form_url(deal_id)
