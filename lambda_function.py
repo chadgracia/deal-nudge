@@ -220,7 +220,9 @@ def lambda_handler(event, context):
 
     contact = deal.get("primary_contact") or {}
     contact_id = contact.get("id") or deal.get("primary_contact_id")
-    contact_name = contact.get("full_name") or "there"
+    contact_name = (contact.get("full_name")
+                    or f"{contact.get('first_name') or ''} {contact.get('last_name') or ''}".strip()
+                    or "there")
     contact_email = (contact.get("email") or "").strip()
 
     if not contact_email and contact_id:
