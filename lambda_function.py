@@ -69,7 +69,7 @@ def _page(status, message):
 
 def _confirm_page(deal_id, key, contact_name, company, test_mode, contact_email):
     who = escape(contact_name or "the contact")
-    co = (" at " + escape(company)) if company else ""
+    co = (" re: " + escape(company)) if company else ""
     note = ('<p style="background:#fffbe6;padding:8px;font-size:12px;">'
             'Test mode: this will go to ' + escape(TEST_EMAIL_OVERRIDE) +
             ' (real recipient would be ' + escape(contact_email) + ').</p>') if test_mode else ""
