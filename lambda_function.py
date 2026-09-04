@@ -48,6 +48,11 @@ NUDGE_SUBJECT = "Activity on your {company} order"
 NUDGE_BODY    = ("We've seen some activity on your indication. Could you take a "
                  "moment to confirm it's still current — or update the price or "
                  "size if anything's changed?")
+INFO_SUBJECT   = "Your {company} order — quick update needed"
+INFO_BODY_SELL = ("We do not have enough information to send you bids. "
+                  "Please take a moment to update:")
+INFO_BODY_BUY  = ("We do not have enough information to send you offers. "
+                  "Please take a moment to update:")
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
@@ -67,13 +72,15 @@ def _page(status, message):
             "body": html}
 
 
-def _confirm_page(deal_id, key, contact_name, company, test_mode, contact_email):
+def _confirm_page(deal_id, key, contact_name, company, test_mode, contact_email, msg=""):
     who = escape(contact_name or "the contact")
     co = (" re: " + escape(company)) if company else ""
     note = ('<p style="background:#fffbe6;padding:8px;font-size:12px;">'
             'Test mode: this will go to ' + escape(TEST_EMAIL_OVERRIDE) +
             ' (real recipient would be ' + escape(contact_email) + ').</p>') if test_mode else ""
     action = "?deal_id=" + escape(deal_id) + "&key=" + escape(key)
+    if msg:
+        action += "&msg=" + escape(msg)
     html = (
         '<!doctype html><html><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
@@ -149,14 +156,15 @@ def write_lock(deal_id, email):
                   Body=body.encode(), ContentType="application/json")
 
 
-def send_email(to_addr, subject, link, lead=""):
-    plain = f"{lead}{NUDGE_BODY}\n\nUpdate your order: {link}\n\nQuestions? {CHAD_EMAIL}"
+def send_email(to_addr, subject, link, lead="", body_text=None):
+    body_text = body_text or NUDGE_BODY
+    plain = f"{lead}{body_text}\n\nUpdate your order: {link}\n\nQuestions? {CHAD_EMAIL}"
     lead_html = ('<p style="background:#fffbe6;padding:8px;font-size:12px;">' + lead + '</p>') if lead else ''
     html = (
         '<html><body style="font-family:Arial,sans-serif;font-size:14px;color:#222;'
         'max-width:600px;margin:40px auto;line-height:1.6;">'
         + lead_html +
-        '<p>' + NUDGE_BODY + '</p>'
+        '<p>' + body_text + '</p>'
         '<p style="margin-top:28px;">'
         '<a href="' + link + '" style="background:#1a1a1a;color:#fff;padding:10px 20px;'
         'text-decoration:none;border-radius:4px;font-size:13px;">Update your order</a>'
@@ -193,6 +201,7 @@ def lambda_handler(event, context):
         return _page(403, "Not authorized.")
 
     deal_id = (params.get("deal_id") or "").strip()
+    msg = (params.get("msg") or "").strip()
     if not deal_id.isdigit():
         return _page(400, "Missing or invalid deal_id.")
 
@@ -241,16 +250,29 @@ def lambda_handler(event, context):
     # fetch with GET and never submit forms) can no longer trigger a send.
     if method != "POST":
         return _confirm_page(deal_id, params.get("key") or "", contact_name, company,
-                             test_mode, contact_email)
+                             test_mode, contact_email, msg)
 
     subject = NUDGE_SUBJECT.format(company=company) if company else "Activity on your order"
+    body_text = None
+    if msg == "info":
+        cf = deal.get("custom_fields") or {}
+        dt = cf.get("custom_label_1958")
+        if isinstance(dt, list):
+            dt = dt[0] if dt else None
+        if dt == 5011675:        # Sell
+            body_text = INFO_BODY_SELL
+        elif dt == 5077819:      # Buy
+            body_text = INFO_BODY_BUY
+        if body_text:
+            subject = (INFO_SUBJECT.format(company=company) if company
+                       else "Your order — quick update needed")
     link = form_url(deal_id)
 
     recipient = TEST_EMAIL_OVERRIDE if test_mode else contact_email
     lead = f"[TEST — real recipient would be: {contact_email}] " if test_mode else ""
 
     try:
-        send_email(recipient, subject, link, lead)
+        send_email(recipient, subject, link, lead, body_text)
     except Exception as e:
         logger.error(f"SES error: {e}")
         return _page(502, "The email failed to send. Try again shortly.")
