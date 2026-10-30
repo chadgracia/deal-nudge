@@ -34,7 +34,6 @@ FORM_LAMBDA_URL     = os.environ["FORM_LAMBDA_URL"]
 NUDGE_KEY           = os.environ["NUDGE_KEY"]
 TEST_EMAIL_OVERRIDE = os.environ.get("TEST_EMAIL_OVERRIDE", "").strip()
 
-SES_SENDER        = "agent@agent.graciagroup.com"
 CHAD_EMAIL        = "cgracia@rainmakersecurities.com"
 TOKEN_BUCKET      = "pipeline-token"
 TOKEN_KEY         = "pipeline-jwt.json"
@@ -53,6 +52,14 @@ INFO_BODY_SELL = ("We do not have enough information to send you bids. "
                   "Please take a moment to update:")
 INFO_BODY_BUY  = ("We do not have enough information to send you offers. "
                   "Please take a moment to update:")
+EXPIRED_SUBJECT_SELL = "Your {company} listing has passed its deadline"
+EXPIRED_BODY_SELL    = ("The deadline on your {company} listing has passed. Could you take a "
+                        "moment to set a new deadline, or cancel the listing if it's no longer "
+                        "available? That way buyers only see current offers.")
+EXPIRED_SUBJECT_BUY  = "Your {company} buy order has passed its deadline"
+EXPIRED_BODY_BUY     = ("The deadline on your {company} buy order has passed. Could you take a "
+                        "moment to set a new deadline, or cancel the order if you're no longer "
+                        "looking? That way sellers only see current interest.")
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
@@ -156,14 +163,16 @@ def write_lock(deal_id, email):
                   Body=body.encode(), ContentType="application/json")
 
 
-def send_email(to_addr, subject, link, lead="", body_text=None):
+def send_email(to_addr, subject, link, lead="", body_text=None, first_name=""):
     body_text = body_text or NUDGE_BODY
-    plain = f"{lead}{body_text}\n\nUpdate your order: {link}\n\nQuestions? {CHAD_EMAIL}"
+    greeting = f"Hi {first_name}," if first_name else "Hi,"
+    plain = f"{lead}{greeting}\n\n{body_text}\n\nUpdate your order: {link}\n\nQuestions? {CHAD_EMAIL}"
     lead_html = ('<p style="background:#fffbe6;padding:8px;font-size:12px;">' + lead + '</p>') if lead else ''
     html = (
         '<html><body style="font-family:Arial,sans-serif;font-size:14px;color:#222;'
         'max-width:600px;margin:40px auto;line-height:1.6;">'
         + lead_html +
+        '<p>' + escape(greeting) + '</p>'
         '<p>' + body_text + '</p>'
         '<p style="margin-top:28px;">'
         '<a href="' + link + '" style="background:#1a1a1a;color:#fff;padding:10px 20px;'
@@ -175,8 +184,9 @@ def send_email(to_addr, subject, link, lead="", body_text=None):
     )
     ses = boto3.client("ses", region_name="us-east-1")
     ses.send_email(
-        Source=SES_SENDER,
+        Source='"Chad Gracia" <cgracia@graciagroup.com>',
         Destination={"ToAddresses": [to_addr]},
+        ReplyToAddresses=[CHAD_EMAIL],
         Message={"Subject": {"Data": subject},
                  "Body": {"Text": {"Data": plain}, "Html": {"Data": html}}})
 
@@ -233,6 +243,9 @@ def lambda_handler(event, context):
                     or f"{contact.get('first_name') or ''} {contact.get('last_name') or ''}".strip()
                     or "there")
     contact_email = (contact.get("email") or "").strip()
+    first_name = (contact.get("first_name") or "").strip()
+    name_for_first = (contact.get("full_name")
+                      or f"{contact.get('first_name') or ''} {contact.get('last_name') or ''}".strip())
 
     if not contact_email and contact_id:
         pstatus, person = pipeline_get(f"/people/{contact_id}.json", jwt)
@@ -241,6 +254,10 @@ def lambda_handler(event, context):
                 person = person["person"]
             contact_email = (person.get("email") or "").strip()
             contact_name = person.get("full_name") or person.get("name") or contact_name
+            first_name = first_name or (person.get("first_name") or "").strip()
+            name_for_first = name_for_first or person.get("full_name") or person.get("name") or ""
+    if not first_name and name_for_first.strip():
+        first_name = name_for_first.split()[0]
 
     if not contact_email:
         return _page(200, f"No email on file for the contact on deal {deal_id}. Nothing sent.")
@@ -266,13 +283,28 @@ def lambda_handler(event, context):
         if body_text:
             subject = (INFO_SUBJECT.format(company=company) if company
                        else "Your order — quick update needed")
+    elif msg == "expired":
+        cf = deal.get("custom_fields") or {}
+        dt = cf.get("custom_label_1958")
+        if isinstance(dt, list):
+            dt = dt[0] if dt else None
+        pair = None
+        if dt == 5011675:        # Sell
+            pair = (EXPIRED_SUBJECT_SELL, EXPIRED_BODY_SELL)
+        elif dt == 5077819:      # Buy
+            pair = (EXPIRED_SUBJECT_BUY, EXPIRED_BODY_BUY)
+        if pair:
+            if company:
+                subject, body_text = (t.format(company=company) for t in pair)
+            else:
+                subject, body_text = (t.replace("{company} ", "") for t in pair)
     link = form_url(deal_id)
 
     recipient = TEST_EMAIL_OVERRIDE if test_mode else contact_email
     lead = f"[TEST — real recipient would be: {contact_email}] " if test_mode else ""
 
     try:
-        send_email(recipient, subject, link, lead, body_text)
+        send_email(recipient, subject, link, lead, body_text, first_name)
     except Exception as e:
         logger.error(f"SES error: {e}")
         return _page(502, "The email failed to send. Try again shortly.")
