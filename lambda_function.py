@@ -29,7 +29,7 @@ logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 # ── Config (secrets come from env) ─────────────────────────────────────────
-HMAC_SECRET         = os.environ["HMAC_SECRET"]
+HMAC_SECRET         = os.environ.get("HMAC_SECRET", "")
 FORM_LAMBDA_URL     = os.environ["FORM_LAMBDA_URL"]
 NUDGE_KEY           = os.environ["NUDGE_KEY"]
 TEST_EMAIL_OVERRIDE = os.environ.get("TEST_EMAIL_OVERRIDE", "").strip()
@@ -110,6 +110,10 @@ def _confirm_page(deal_id, key, contact_name, company, test_mode, contact_email,
 
 
 def make_token(deal_id):
+    """Deal-update-form token, signed with HMAC_SECRET only. Empty key -> ""
+    (never signs with an empty key)."""
+    if not HMAC_SECRET:
+        return ""
     sig = hmac.new(HMAC_SECRET.encode(), f"{deal_id}".encode(), hashlib.sha256).digest()
     return base64.urlsafe_b64encode(sig).decode().rstrip("=")
 
@@ -298,6 +302,9 @@ def lambda_handler(event, context):
                 subject, body_text = (t.format(company=company) for t in pair)
             else:
                 subject, body_text = (t.replace("{company} ", "") for t in pair)
+    if not HMAC_SECRET:
+        logger.error("deal-nudge: HMAC_SECRET is not set; refusing to send a nudge without a signed link")
+        return _page(503, "Sending is not configured right now (signing key missing). Nothing was sent.")
     link = form_url(deal_id)
 
     recipient = TEST_EMAIL_OVERRIDE if test_mode else contact_email
